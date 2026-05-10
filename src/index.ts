@@ -12,7 +12,7 @@
 
 import type { Env, ExtractRequest, ExtractionResult, Palette } from "./types";
 import { STRATEGIES } from "./strategies";
-import { decodePNG, samplePixels } from "./png-decoder";
+import { decodeImage, samplePixels } from "./image-decoder";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -148,7 +148,6 @@ async function fetchAndDecode(imageUrl: string, maxSize: number): Promise<[numbe
     throw new Error(`Failed to fetch image: ${response.status}`);
   }
 
-  const contentType = response.headers.get("content-type") || "";
   const buffer = await response.arrayBuffer();
 
   // Check size
@@ -156,15 +155,9 @@ async function fetchAndDecode(imageUrl: string, maxSize: number): Promise<[numbe
     throw new Error(`Image too large: ${buffer.byteLength} bytes (max: ${maxSize})`);
   }
 
-  // Decode based on content type
-  if (contentType.includes("png") || imageUrl.toLowerCase().endsWith(".png")) {
-    const decoded = decodePNG(buffer);
-    return samplePixels(decoded);
-  }
-
-  // For other formats, try to use a simple approach
-  // In production, you'd want to support JPEG, WebP, etc.
-  throw new Error(`Unsupported image format: ${contentType || "unknown"}. Currently only PNG is supported.`);
+  // Decode image
+  const decoded = await decodeImage(buffer);
+  return samplePixels(decoded);
 }
 
 /** Generate CSS variables from palette */
@@ -261,11 +254,10 @@ const HTML_PAGE = `<!DOCTYPE html>
 <body>
   <div class="container">
     <h1>🎨 Color Palette Extractor</h1>
-    <p style="color: #666; margin-bottom: 1rem;">目前仅支持 PNG 格式</p>
 
     <div class="upload-zone" id="dropZone">
-      <p>拖拽 PNG 图片到这里，或点击选择</p>
-      <input type="file" id="fileInput" accept="image/png" hidden>
+      <p>拖拽图片到这里，或点击选择</p>
+      <input type="file" id="fileInput" accept="image/*" hidden>
     </div>
 
     <img id="preview" class="preview" style="display:none">
@@ -328,43 +320,37 @@ const HTML_PAGE = `<!DOCTYPE html>
       preview.src = URL.createObjectURL(file);
       preview.style.display = 'block';
 
-      // Convert to base64
+      // Convert to base64 data URL for API
       const reader = new FileReader();
       reader.onload = async () => {
-        const base64 = reader.result.split(',')[1];
-        // We'll send the file as a data URL for now
-        // In production, you'd upload to R2 or similar
-        document.getElementById('palettes').innerHTML = '<p>请使用 API 直接调用，或上传图片到可公开访问的 URL</p>';
+        const dataUrl = reader.result;
+        
+        try {
+          const response = await fetch(API + '/api/extract', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              image: dataUrl,
+              strategies: selectedStrategies 
+            })
+          });
+
+          const data = await response.json();
+
+          if (data.error) {
+            errorEl.textContent = data.error;
+            errorEl.style.display = 'block';
+            return;
+          }
+
+          displayPalettes(data.data.palettes);
+        } catch (e) {
+          errorEl.textContent = e.message;
+          errorEl.style.display = 'block';
+        }
       };
       reader.readAsDataURL(file);
     }
-
-    // API test function
-    window.testExtract = async function(imageUrl) {
-      const errorEl = document.getElementById('error');
-      errorEl.style.display = 'none';
-
-      try {
-        const response = await fetch(API + '/api/extract', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: imageUrl, strategies: selectedStrategies })
-        });
-
-        const data = await response.json();
-
-        if (data.error) {
-          errorEl.textContent = data.error;
-          errorEl.style.display = 'block';
-          return;
-        }
-
-        displayPalettes(data.data.palettes);
-      } catch (e) {
-        errorEl.textContent = e.message;
-        errorEl.style.display = 'block';
-      }
-    };
 
     function displayPalettes(palettes) {
       const container = document.getElementById('palettes');
